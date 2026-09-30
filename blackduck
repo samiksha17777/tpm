@@ -1,0 +1,1118 @@
+# ============================================================
+# INTENTIONALLY VULNERABLE WEB APPLICATION
+# FOR LOCAL VAPT / SECURITY TESTING ONLY
+# ============================================================
+
+from flask import (
+    Flask,
+    request,
+    render_template_string,
+    redirect,
+    make_response,
+    jsonify,
+    session,
+    send_file
+)
+
+import sqlite3
+import os
+import subprocess
+import hashlib
+import base64
+import json
+import pickle
+import urllib.request
+from functools import wraps
+
+app = Flask(__name__)
+
+# ------------------------------------------------------------
+# INTENTIONALLY WEAK CONFIGURATION
+# ------------------------------------------------------------
+
+app.secret_key = "super-secret-key-123"
+
+DATABASE = "vulnerable.db"
+UPLOAD_DIR = "uploads"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# ------------------------------------------------------------
+# DATABASE
+# ------------------------------------------------------------
+
+def db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            password TEXT,
+            role TEXT,
+            email TEXT,
+            secret TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            price INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            comment TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # Hardcoded credentials
+    # --------------------------------------------------------
+
+    users = [
+        (
+            "admin",
+            "admin123",
+            "admin",
+            "admin@vuln.local",
+            "ADMIN_SECRET_FLAG_12345"
+        ),
+        (
+            "alice",
+            "password",
+            "user",
+            "alice@vuln.local",
+            "ALICE_SECRET_98765"
+        ),
+        (
+            "bob",
+            "bob123",
+            "user",
+            "bob@vuln.local",
+            "BOB_SECRET_45678"
+        )
+    ]
+
+    for u in users:
+
+        try:
+            cur.execute("""
+                INSERT INTO users
+                (username,password,role,email,secret)
+                VALUES (?,?,?,?,?)
+            """, u)
+
+        except:
+            pass
+
+    products = [
+        ("Laptop", "Business laptop", 70000),
+        ("Phone", "Smart phone", 40000),
+        ("Monitor", "4K monitor", 25000),
+        ("Keyboard", "Mechanical keyboard", 5000)
+    ]
+
+    for p in products:
+
+        try:
+            cur.execute("""
+                INSERT INTO products
+                (name,description,price)
+                VALUES (?,?,?)
+            """, p)
+
+        except:
+            pass
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# HTML
+# ============================================================
+
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Vulnerable Corp</title>
+
+<style>
+
+body {
+    font-family: Arial;
+    background:#111;
+    color:#eee;
+    margin:40px;
+}
+
+a {
+    color:#00ff99;
+}
+
+input, textarea {
+    padding:10px;
+    margin:5px;
+    width:300px;
+}
+
+button {
+    padding:10px 20px;
+}
+
+.box {
+    border:1px solid #555;
+    padding:20px;
+    margin:20px 0;
+}
+
+.warning {
+    color:red;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>Vulnerable Corp</h1>
+
+<div class="box">
+
+<a href="/">Home</a> |
+<a href="/login">Login</a> |
+<a href="/products">Products</a> |
+<a href="/search">Search</a> |
+<a href="/comments">Comments</a> |
+<a href="/profile">Profile</a> |
+<a href="/admin">Admin</a> |
+<a href="/upload">Upload</a>
+
+</div>
+
+{{content|safe}}
+
+</body>
+</html>
+"""
+
+
+def page(content):
+
+    return render_template_string(
+        HTML,
+        content=content
+    )
+
+
+# ============================================================
+# HOME
+# ============================================================
+
+@app.route("/")
+def home():
+
+    return page("""
+        <h2>Welcome to Vulnerable Corp</h2>
+
+        <p>
+        This application intentionally contains security
+        vulnerabilities for VAPT practice.
+        </p>
+
+        <h3>Test Accounts</h3>
+
+        <ul>
+            <li>admin / admin123</li>
+            <li>alice / password</li>
+            <li>bob / bob123</li>
+        </ul>
+
+        <p class="warning">
+        DEBUG MODE ENABLED
+        </p>
+    """)
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+
+    if request.method == "GET":
+
+        return page("""
+        <h2>Login</h2>
+
+        <form method="POST">
+
+            <input name="username"
+                   placeholder="Username">
+
+            <input name="password"
+                   type="password"
+                   placeholder="Password">
+
+            <button>Login</button>
+
+        </form>
+        """)
+
+    username = request.form.get("username")
+    password = request.form.get("password")
+
+    conn = db()
+
+    # --------------------------------------------------------
+    # SQL INJECTION
+    # --------------------------------------------------------
+
+    query = f"""
+        SELECT * FROM users
+        WHERE username='{username}'
+        AND password='{password}'
+    """
+
+    try:
+
+        user = conn.execute(query).fetchone()
+
+    except Exception as e:
+
+        return page("""
+            <h2>Database Error</h2>
+            <pre>%s</pre>
+        """ % str(e))
+
+    if user:
+
+        # ----------------------------------------------------
+        # WEAK SESSION
+        # ----------------------------------------------------
+
+        session["user_id"] = user["id"]
+        session["username"] = user["username"]
+        session["role"] = user["role"]
+
+        return redirect("/profile")
+
+    return page("<h2>Invalid username or password</h2>")
+
+
+# ============================================================
+# USER ENUMERATION
+# ============================================================
+
+@app.route("/check-user")
+def check_user():
+
+    username = request.args.get("username")
+
+    conn = db()
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE username=?",
+        (username,)
+    ).fetchone()
+
+    if user:
+
+        return jsonify({
+            "exists": True,
+            "message": "User exists"
+        })
+
+    return jsonify({
+        "exists": False,
+        "message": "User does not exist"
+    })
+
+
+# ============================================================
+# PROFILE
+# ============================================================
+
+@app.route("/profile")
+def profile():
+
+    user_id = request.args.get(
+        "id",
+        session.get("user_id")
+    )
+
+    if not user_id:
+
+        return redirect("/login")
+
+    conn = db()
+
+    # --------------------------------------------------------
+    # IDOR / BROKEN ACCESS CONTROL
+    # --------------------------------------------------------
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE id=?",
+        (user_id,)
+    ).fetchone()
+
+    if not user:
+
+        return "User not found"
+
+    return page(f"""
+        <h2>User Profile</h2>
+
+        <p>ID: {user["id"]}</p>
+        <p>Username: {user["username"]}</p>
+        <p>Email: {user["email"]}</p>
+        <p>Role: {user["role"]}</p>
+
+        <p>
+        Secret:
+        {user["secret"]}
+        </p>
+    """)
+
+
+# ============================================================
+# PRODUCTS
+# ============================================================
+
+@app.route("/products")
+def products():
+
+    conn = db()
+
+    products = conn.execute(
+        "SELECT * FROM products"
+    ).fetchall()
+
+    html = "<h2>Products</h2>"
+
+    for p in products:
+
+        html += f"""
+        <div class="box">
+
+            <h3>
+                <a href="/product?id={p['id']}">
+                    {p['name']}
+                </a>
+            </h3>
+
+            <p>{p['description']}</p>
+
+            <p>Price: {p['price']}</p>
+
+        </div>
+        """
+
+    return page(html)
+
+
+# ============================================================
+# PRODUCT IDOR
+# ============================================================
+
+@app.route("/product")
+def product():
+
+    product_id = request.args.get("id")
+
+    conn = db()
+
+    product = conn.execute(
+        "SELECT * FROM products WHERE id=?",
+        (product_id,)
+    ).fetchone()
+
+    if not product:
+
+        return "Product not found"
+
+    return page(f"""
+        <h2>{product["name"]}</h2>
+
+        <p>{product["description"]}</p>
+
+        <p>Price: {product["price"]}</p>
+
+        <p>
+        Internal Product ID:
+        {product["id"]}
+        </p>
+    """)
+
+
+# ============================================================
+# SEARCH - REFLECTED XSS
+# ============================================================
+
+@app.route("/search")
+def search():
+
+    q = request.args.get("q", "")
+
+    return page(f"""
+        <h2>Search</h2>
+
+        <form>
+
+            <input name="q"
+                   value="{q}">
+
+            <button>Search</button>
+
+        </form>
+
+        <h3>
+            Search results for:
+            {q}
+        </h3>
+    """)
+
+
+# ============================================================
+# COMMENTS - STORED XSS
+# ============================================================
+
+@app.route("/comments", methods=["GET", "POST"])
+def comments():
+
+    conn = db()
+
+    if request.method == "POST":
+
+        username = request.form.get("username")
+        comment = request.form.get("comment")
+
+        # ----------------------------------------------------
+        # STORED XSS
+        # ----------------------------------------------------
+
+        conn.execute("""
+            INSERT INTO comments
+            (username,comment)
+            VALUES (?,?)
+        """, (username, comment))
+
+        conn.commit()
+
+        return redirect("/comments")
+
+    rows = conn.execute(
+        "SELECT * FROM comments"
+    ).fetchall()
+
+    html = """
+
+    <h2>Comments</h2>
+
+    <form method="POST">
+
+        <input name="username"
+               placeholder="Username">
+
+        <textarea name="comment"
+                  placeholder="Comment"></textarea>
+
+        <button>Post</button>
+
+    </form>
+
+    """
+
+    for row in rows:
+
+        html += f"""
+
+        <div class="box">
+
+            <b>{row["username"]}</b>
+
+            <p>{row["comment"]}</p>
+
+        </div>
+
+        """
+
+    return page(html)
+
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+@app.route("/admin")
+def admin():
+
+    # --------------------------------------------------------
+    # BROKEN ACCESS CONTROL
+    #
+    # No authentication / authorization check
+    # --------------------------------------------------------
+
+    conn = db()
+
+    users = conn.execute(
+        "SELECT id,username,email,role,secret FROM users"
+    ).fetchall()
+
+    output = "<h2>Admin Panel</h2>"
+
+    for u in users:
+
+        output += f"""
+        <div class="box">
+
+            ID: {u["id"]}<br>
+            Username: {u["username"]}<br>
+            Email: {u["email"]}<br>
+            Role: {u["role"]}<br>
+            Secret: {u["secret"]}
+
+        </div>
+        """
+
+    return page(output)
+
+
+# ============================================================
+# ADMIN DELETE
+# ============================================================
+
+@app.route("/admin/delete", methods=["POST", "GET"])
+def admin_delete():
+
+    user_id = request.args.get("id")
+
+    conn = db()
+
+    # --------------------------------------------------------
+    # CSRF + BROKEN ACCESS CONTROL
+    # --------------------------------------------------------
+
+    conn.execute(
+        "DELETE FROM users WHERE id=?",
+        (user_id,)
+    )
+
+    conn.commit()
+
+    return jsonify({
+        "status": "deleted",
+        "id": user_id
+    })
+
+
+# ============================================================
+# COMMAND INJECTION
+# ============================================================
+
+@app.route("/ping")
+def ping():
+
+    host = request.args.get("host", "127.0.0.1")
+
+    # --------------------------------------------------------
+    # COMMAND INJECTION
+    # --------------------------------------------------------
+
+    command = "ping -c 2 " + host
+
+    result = subprocess.check_output(
+        command,
+        shell=True,
+        stderr=subprocess.STDOUT
+    )
+
+    return "<pre>" + result.decode() + "</pre>"
+
+
+# ============================================================
+# PATH TRAVERSAL / LOCAL FILE READ
+# ============================================================
+
+@app.route("/download")
+def download():
+
+    filename = request.args.get("file")
+
+    path = os.path.join(
+        "uploads",
+        filename
+    )
+
+    # --------------------------------------------------------
+    # PATH TRAVERSAL
+    # --------------------------------------------------------
+
+    try:
+
+        return send_file(path)
+
+    except Exception as e:
+
+        return str(e)
+
+
+# ============================================================
+# FILE UPLOAD
+# ============================================================
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+
+    if request.method == "GET":
+
+        return page("""
+        <h2>Upload File</h2>
+
+        <form method="POST"
+              enctype="multipart/form-data">
+
+            <input type="file"
+                   name="file">
+
+            <button>Upload</button>
+
+        </form>
+        """)
+
+    uploaded = request.files.get("file")
+
+    if not uploaded:
+
+        return "No file"
+
+    # --------------------------------------------------------
+    # UNRESTRICTED FILE UPLOAD
+    # --------------------------------------------------------
+
+    path = os.path.join(
+        UPLOAD_DIR,
+        uploaded.filename
+    )
+
+    uploaded.save(path)
+
+    return jsonify({
+        "uploaded": True,
+        "filename": uploaded.filename,
+        "path": path
+    })
+
+
+# ============================================================
+# SSRF
+# ============================================================
+
+@app.route("/fetch")
+def fetch():
+
+    url = request.args.get("url")
+
+    if not url:
+
+        return "Missing url"
+
+    # --------------------------------------------------------
+    # SSRF
+    # --------------------------------------------------------
+
+    try:
+
+        response = urllib.request.urlopen(
+            url,
+            timeout=5
+        )
+
+        data = response.read()
+
+        return data
+
+    except Exception as e:
+
+        return str(e)
+
+
+# ============================================================
+# OPEN REDIRECT
+# ============================================================
+
+@app.route("/redirect")
+def open_redirect():
+
+    url = request.args.get(
+        "url",
+        "/"
+    )
+
+    # --------------------------------------------------------
+    # OPEN REDIRECT
+    # --------------------------------------------------------
+
+    return redirect(url)
+
+
+# ============================================================
+# MASS ASSIGNMENT
+# ============================================================
+
+@app.route("/api/user/update", methods=["POST"])
+def update_user():
+
+    if not session.get("user_id"):
+
+        return jsonify({
+            "error": "not authenticated"
+        }), 401
+
+    data = request.get_json()
+
+    conn = db()
+
+    # --------------------------------------------------------
+    # MASS ASSIGNMENT
+    #
+    # Client can potentially modify role/secret/etc.
+    # --------------------------------------------------------
+
+    fields = []
+
+    values = []
+
+    for key, value in data.items():
+
+        fields.append(
+            f"{key}=?"
+        )
+
+        values.append(value)
+
+    values.append(
+        session["user_id"]
+    )
+
+    query = f"""
+        UPDATE users
+        SET {",".join(fields)}
+        WHERE id=?
+    """
+
+    conn.execute(
+        query,
+        values
+    )
+
+    conn.commit()
+
+    return jsonify({
+        "updated": True,
+        "data": data
+    })
+
+
+# ============================================================
+# API USER DATA
+# ============================================================
+
+@app.route("/api/user/<user_id>")
+def api_user(user_id):
+
+    conn = db()
+
+    # --------------------------------------------------------
+    # API IDOR
+    # --------------------------------------------------------
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE id=?",
+        (user_id,)
+    ).fetchone()
+
+    if not user:
+
+        return jsonify({
+            "error": "not found"
+        }), 404
+
+    return jsonify({
+        "id": user["id"],
+        "username": user["username"],
+        "email": user["email"],
+        "role": user["role"],
+        "secret": user["secret"],
+        "password": user["password"]
+    })
+
+
+# ============================================================
+# DEBUG / ENVIRONMENT DISCLOSURE
+# ============================================================
+
+@app.route("/debug")
+def debug():
+
+    return jsonify({
+
+        "environment": dict(os.environ),
+
+        "working_directory": os.getcwd(),
+
+        "python": os.sys.version,
+
+        "database": DATABASE,
+
+        "secret_key": app.secret_key
+
+    })
+
+
+# ============================================================
+# CONFIG DISCLOSURE
+# ============================================================
+
+@app.route("/config")
+def config():
+
+    return jsonify({
+
+        "database": DATABASE,
+
+        "admin_username": "admin",
+
+        "admin_password": "admin123",
+
+        "api_key": "API-KEY-123456789",
+
+        "internal_server": "127.0.0.1",
+
+        "debug": True
+
+    })
+
+
+# ============================================================
+# UNSAFE DESERIALIZATION
+# ============================================================
+
+@app.route("/deserialize", methods=["POST"])
+def deserialize():
+
+    data = request.data
+
+    # --------------------------------------------------------
+    # INSECURE DESERIALIZATION
+    #
+    # DO NOT expose this application to the Internet.
+    # --------------------------------------------------------
+
+    try:
+
+        obj = pickle.loads(
+            base64.b64decode(data)
+        )
+
+        return jsonify({
+            "result": str(obj)
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        })
+
+
+# ============================================================
+# WEAK TOKEN
+# ============================================================
+
+@app.route("/api/token")
+def token():
+
+    username = request.args.get(
+        "username",
+        "guest"
+    )
+
+    # --------------------------------------------------------
+    # WEAK CUSTOM TOKEN
+    # --------------------------------------------------------
+
+    token_data = {
+        "username": username,
+        "role": "user"
+    }
+
+    encoded = base64.b64encode(
+        json.dumps(token_data).encode()
+    ).decode()
+
+    return jsonify({
+        "token": encoded
+    })
+
+
+# ============================================================
+# TOKEN API
+# ============================================================
+
+@app.route("/api/token/profile")
+def token_profile():
+
+    token = request.headers.get(
+        "Authorization",
+        ""
+    )
+
+    if token.startswith("Bearer "):
+
+        token = token.replace(
+            "Bearer ",
+            ""
+        )
+
+    try:
+
+        decoded = base64.b64decode(
+            token
+        )
+
+        data = json.loads(
+            decoded
+        )
+
+        return jsonify({
+
+            "authenticated": True,
+
+            "user": data
+
+        })
+
+    except:
+
+        return jsonify({
+            "authenticated": False
+        }), 401
+
+
+# ============================================================
+# METHOD TESTING
+# ============================================================
+
+@app.route(
+    "/api/method-test",
+    methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "OPTIONS"
+    ]
+)
+def method_test():
+
+    return jsonify({
+
+        "method": request.method,
+
+        "headers": dict(request.headers),
+
+        "data": request.get_data(
+            as_text=True
+        )
+
+    })
+
+
+# ============================================================
+# CORS MISCONFIGURATION
+# ============================================================
+
+@app.after_request
+def headers(response):
+
+    # --------------------------------------------------------
+    # INTENTIONALLY BAD CORS
+    # --------------------------------------------------------
+
+    response.headers[
+        "Access-Control-Allow-Origin"
+    ] = "*"
+
+    response.headers[
+        "Access-Control-Allow-Credentials"
+    ] = "true"
+
+    # --------------------------------------------------------
+    # SECURITY HEADERS INTENTIONALLY MISSING
+    # --------------------------------------------------------
+
+    return response
+
+
+# ============================================================
+# VERBOSE ERROR HANDLER
+# ============================================================
+
+@app.errorhandler(Exception)
+def error_handler(error):
+
+    return page(f"""
+
+        <h2>Application Error</h2>
+
+        <p>
+        Something went wrong.
+        </p>
+
+        <pre>
+        {error}
+        </pre>
+
+    """), 500
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    init_db()
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+
+        # ----------------------------------------------------
+        # DEBUG ENABLED INTENTIONALLY
+        # ----------------------------------------------------
+
+        debug=True
+    )
